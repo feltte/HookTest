@@ -81,32 +81,58 @@ namespace HookTest
 			return (windowHundleInt64, windowTextBuffer.ToString());
 		}
 
+		private (long, string) GetWindowHundleAndTextFromPoint(Point point)
+		{
+			long windowHundleInt64 = 0;
+			windowTextBuffer.Length = 0;
+			var hwnd = WindowFromPoint(point);
+			if (hwnd != IntPtr.Zero)
+			{
+				GetWindowText(hwnd, windowTextBuffer, windowTextBuffer.Capacity);
+				windowHundleInt64 = hwnd.ToInt64();
+			}
+			return (windowHundleInt64, windowTextBuffer.ToString());
+		}
+
 		readonly MouseHook.Stroke strokeMask = MouseHook.Stroke.LEFT_DOWN | MouseHook.Stroke.LEFT_UP
 											| MouseHook.Stroke.RIGHT_DOWN | MouseHook.Stroke.RIGHT_UP;
+
+		private int previousX, previousY;
 
 		void hookMouseTest(ref MouseHook.StateMouse s)
 		{
 			button1.Text = s.X + ", " + s.Y;
-			if ((s.Stroke & strokeMask) > 0)
-			{
-				logMessageBuffer.Length = 0;
-				(var hundle, var windowText) = GetForgroundWindowHundleAndText();
-				logMessageBuffer.Append($"{DateTime.Now:HH:mm:ss}, 0x{hundle:X8}, {windowText}, Mouse.{s.Stroke}");
 
-				logStream.WriteLine(logMessageBuffer);
-				textBox1.Text = logMessageBuffer + "\r\n" + textBox1.Text;
-			}
+			if ((s.Stroke & strokeMask) == 0)	return;			// Down/Up以外は無視
+			if (s.X == previousX && s.Y == previousY) return;   // 前回と同じ場所でのクリックは無視
+
+			logMessageBuffer.Length = 0;
+			(var hundle, var windowText) = GetForgroundWindowHundleAndText();
+			logMessageBuffer.Append($"{DateTime.Now:HH:mm:ss}, {hundle:X8}, {s.Stroke}, {windowText}");
+			textBox1.Text = logMessageBuffer + "\r\n" + textBox1.Text;
+			logStream.WriteLine(logMessageBuffer);
+
+			previousX = s.X;
+			previousY = s.Y;
 		}
 
+		long previousHwnd = 0;
+		long previousTicks = 0;
 		void hookKeyboardTest(ref KeyboardHook.StateKeyboard s)
 		{
 			button2.Text = s.Key.ToString();
-			logMessageBuffer.Length = 0;
 			(var hundle, var windowText) = GetForgroundWindowHundleAndText();
-			logMessageBuffer.Append($"{DateTime.Now:HH:mm:ss}, 0x{hundle:X8}, {windowText}, Keyboard");
 
-			logStream.WriteLine(logMessageBuffer);
+			if (hundle == previousHwnd && (DateTime.Now.Ticks - previousTicks)<10000000) return;
+			// 同じウインドウ上で1秒以内のキー入力は無視する
+
+			logMessageBuffer.Length = 0;
+			logMessageBuffer.Append($"{DateTime.Now:HH:mm:ss}, {hundle:X8}, Keyboard, {windowText}");
 			textBox1.Text = logMessageBuffer + "\r\n" + textBox1.Text;
+			logStream.WriteLine(logMessageBuffer);
+
+			previousHwnd = hundle;
+			previousTicks = DateTime.Now.Ticks;
 		}
 
 		private void button1_Click(object sender, EventArgs e)
@@ -126,6 +152,7 @@ namespace HookTest
 				return;
 			}
 
+			button1.Text = "Mouse Hooking";
 			MouseHook.AddEvent(hookMouseTest);
 			MouseHook.Start();
 		}
@@ -147,6 +174,7 @@ namespace HookTest
 				return;
 			}
 
+			button2.Text = "Keyboard Hooking";
 			KeyboardHook.AddEvent(hookKeyboardTest);
 			KeyboardHook.Start();
 		}
