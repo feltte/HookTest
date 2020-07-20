@@ -2,48 +2,32 @@
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using System.Runtime.InteropServices;
 
 namespace HookTest
 {
 	public partial class Form1 : Form
 	{
-		#region Win32API Methods
-		[System.Runtime.InteropServices.DllImport("user32.dll")]
-		private static extern IntPtr GetForegroundWindow();
-
-		[System.Runtime.InteropServices.DllImport("user32.dll")]
-		private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
-
-		[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-		private static extern IntPtr WindowFromPoint(Point point);
-		/*
-				[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-				private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-				[System.Runtime.InteropServices.DllImport("kernel32.dll")]
-				private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
-
-				[System.Runtime.InteropServices.DllImport("kernel32.dll")]
-				private static extern bool CloseHandle(IntPtr handle);
-		*/
-		#endregion
-
 		private readonly int windowTextBufferLength = 256;
 		private StringBuilder windowTextBuffer;
 		private readonly int logMessageBufferLength = 256;
 		private StringBuilder logMessageBuffer;
+
+		Dictionary<IntPtr, string> windowHandleExeFilePathDic;
 
 		public Form1()
 		{
 			InitializeComponent();
 			windowTextBuffer = new StringBuilder(windowTextBufferLength);
 			logMessageBuffer = new StringBuilder(logMessageBufferLength);
+			windowHandleExeFilePathDic = new Dictionary<IntPtr, string>();
 		}
 
 		private StreamWriter logStream;
@@ -51,9 +35,9 @@ namespace HookTest
 		{
 			try
 			{
-				logStream = new StreamWriter($"{DateTime.Now.ToString("yyyyMMdd-HHmm")}.txt", true, Encoding.GetEncoding("SHIFT_JIS"));
+				logStream = new StreamWriter($"{DateTime.Now("yyyyMMdd-HHmm")}.txt", true, Encoding.GetEncoding("SHIFT_JIS"));
 			}
-			catch (Exception e)
+			catch (Exception)
 			{
 				return false;
 			}
@@ -68,36 +52,85 @@ namespace HookTest
 			logStream = null;
 		}
 
-		private (long, string) GetForgroundWindowHundleAndText()
+		private (IntPtr, string) GetForgroundWindowHundleAndText()
 		{
-			long windowHundleInt64 = 0;
 			windowTextBuffer.Length = 0;
-			var hwnd = GetForegroundWindow();
+			var hwnd = Win32Api.GetForegroundWindow();
 			if (hwnd != IntPtr.Zero)
 			{
-				GetWindowText(hwnd, windowTextBuffer, windowTextBuffer.Capacity);
-				windowHundleInt64 = hwnd.ToInt64();
+				Win32Api.GetWindowText(hwnd, windowTextBuffer, windowTextBuffer.Capacity);
 			}
-			return (windowHundleInt64, windowTextBuffer.ToString());
+			return (hwnd, windowTextBuffer.ToString());
 		}
 
-		private (long, string) GetWindowHundleAndTextFromPoint(Point point)
+		private (IntPtr, string) GetWindowHundleAndTextFromPoint(Point point)
 		{
-			long windowHundleInt64 = 0;
 			windowTextBuffer.Length = 0;
-			var hwnd = WindowFromPoint(point);
+			var hwnd = Win32Api.WindowFromPoint(point);
 			if (hwnd != IntPtr.Zero)
 			{
-				GetWindowText(hwnd, windowTextBuffer, windowTextBuffer.Capacity);
-				windowHundleInt64 = hwnd.ToInt64();
+				Win32Api.GetWindowText(hwnd, windowTextBuffer, windowTextBuffer.Capacity);
 			}
-			return (windowHundleInt64, windowTextBuffer.ToString());
+			return (hwnd, windowTextBuffer.ToString());
 		}
 
 		readonly MouseHook.Stroke strokeMask = MouseHook.Stroke.LEFT_DOWN | MouseHook.Stroke.LEFT_UP
 											| MouseHook.Stroke.RIGHT_DOWN | MouseHook.Stroke.RIGHT_UP;
 
 		private int previousX, previousY;
+
+		class ProcessInfo
+		{
+			public uint ProcessId = 0;
+			public IntPtr ProcessHandle = IntPtr.Zero;
+			public int NumberOfModules = 0;
+			public int Win32ErrorCode = 0;
+			public string ProcessFilePath=null;
+		}
+
+		private ProcessInfo GetProcessInfoFromWindowHandle(IntPtr windowHandle)
+		{
+			var processInfo = new ProcessInfo();
+
+			Debug.WriteLine("");
+			Win32Api.GetWindowThreadProcessId(windowHandle, out processInfo.ProcessId);
+			if (processInfo.ProcessId == 0)	return processInfo;
+			Debug.WriteLine($"Process ID: {processInfo.ProcessId}");
+
+			processInfo.ProcessHandle = Win32Api.OpenProcess(Win32Api.PROCESS_QUERY_INFORMATION | Win32Api.PROCESS_VM_READ, false, processInfo.ProcessId);
+			if (processInfo.ProcessHandle == IntPtr.Zero) return processInfo;
+			Debug.WriteLine($"Process Handle: {processInfo.ProcessHandle}");
+
+			const uint LIST_MODULES_ALL = 0x03;
+			IntPtr[] moduleHandles = new IntPtr[0];
+			int bytesNeeded = 0;
+			if (!Win32Api.EnumProcessModulesEx(processInfo.ProcessHandle, moduleHandles, 0, out bytesNeeded, LIST_MODULES_ALL))
+			{
+				Debug.WriteLine($"EnumProcessModulesEx モジュールサイズ取得失敗");
+				Win32Api.CloseHandle(processInfo.ProcessHandle);
+				processInfo.Win32ErrorCode = Marshal.GetLastWin32Error();
+				return processInfo;
+			}
+			Debug.WriteLine($"Module Size: {bytesNeeded}");
+
+			processInfo.NumberOfModules = bytesNeeded / IntPtr.Size;
+			moduleHandles = new IntPtr[processInfo.NumberOfModules];
+			if (!Win32Api.EnumProcessModulesEx(processInfo.ProcessHandle, moduleHandles, (uint)bytesNeeded, out bytesNeeded, LIST_MODULES_ALL))
+			{
+				Debug.WriteLine($"EnumProcessModulesEx モジュール取得失敗");
+				Win32Api.CloseHandle(processInfo.ProcessHandle);
+				processInfo.Win32ErrorCode = Marshal.GetLastWin32Error();
+				return processInfo;
+			}
+
+			StringBuilder moduleFilePath = new StringBuilder(1024);
+			Win32Api.GetModuleFileNameEx(processInfo.ProcessHandle, moduleHandles[0], moduleFilePath, (uint)(moduleFilePath.Capacity));
+			processInfo.ProcessFilePath = moduleFilePath.ToString();
+			Debug.WriteLine($"モジュールファイルパス:{processInfo.ProcessFilePath}");
+
+			Win32Api.CloseHandle(processInfo.ProcessHandle);
+			return processInfo;
+		}
 
 		void hookMouseTest(ref MouseHook.StateMouse s)
 		{
@@ -107,8 +140,17 @@ namespace HookTest
 			if (s.X == previousX && s.Y == previousY) return;   // 前回と同じ場所でのクリックは無視
 
 			logMessageBuffer.Length = 0;
-			(var hundle, var windowText) = GetForgroundWindowHundleAndText();
-			logMessageBuffer.Append($"{DateTime.Now:HH:mm:ss}, {hundle:X8}, {s.Stroke}, {windowText}");
+			(var handle, var windowText) = GetForgroundWindowHundleAndText();
+
+			if (handle == this.Handle) return;
+
+			if(!windowHandleExeFilePathDic.ContainsKey(handle))
+			{
+				var processInfo = GetProcessInfoFromWindowHandle(handle);
+				windowHandleExeFilePathDic.Add(handle, Path.GetFileName(processInfo.ProcessFilePath));
+			}
+
+			logMessageBuffer.Append($"{DateTime.Now:HH:mm:ss}, {handle.ToInt64():X8}, {s.Stroke}, {windowText}, {windowHandleExeFilePathDic[handle]}");
 			textBox1.Text = logMessageBuffer + "\r\n" + textBox1.Text;
 			logStream.WriteLine(logMessageBuffer);
 
@@ -116,22 +158,29 @@ namespace HookTest
 			previousY = s.Y;
 		}
 
-		long previousHwnd = 0;
+		IntPtr previousHwnd = IntPtr.Zero;
 		long previousTicks = 0;
 		void hookKeyboardTest(ref KeyboardHook.StateKeyboard s)
 		{
 			button2.Text = s.Key.ToString();
-			(var hundle, var windowText) = GetForgroundWindowHundleAndText();
+			(var handle, var windowText) = GetForgroundWindowHundleAndText();
 
-			if (hundle == previousHwnd && (DateTime.Now.Ticks - previousTicks)<10000000) return;
-			// 同じウインドウ上で1秒以内のキー入力は無視する
+			if (handle == previousHwnd && (DateTime.Now.Ticks - previousTicks)<10000000) return;    // 同じウインドウ上で1秒以内のキー入力は無視する
+
+			if (handle == this.Handle) return;
+
+			if (!windowHandleExeFilePathDic.ContainsKey(handle))
+			{
+				var processInfo = GetProcessInfoFromWindowHandle(handle);
+				windowHandleExeFilePathDic.Add(handle, Path.GetFileName(processInfo.ProcessFilePath));
+			}
 
 			logMessageBuffer.Length = 0;
-			logMessageBuffer.Append($"{DateTime.Now:HH:mm:ss}, {hundle:X8}, Keyboard, {windowText}");
+			logMessageBuffer.Append($"{DateTime.Now:HH:mm:ss}, {handle.ToInt64():X8}, KEYBOARD, {windowText}, {windowHandleExeFilePathDic[handle]}");
 			textBox1.Text = logMessageBuffer + "\r\n" + textBox1.Text;
 			logStream.WriteLine(logMessageBuffer);
 
-			previousHwnd = hundle;
+			previousHwnd = handle;
 			previousTicks = DateTime.Now.Ticks;
 		}
 
