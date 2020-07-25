@@ -15,9 +15,12 @@ namespace HookTest
 {
 	public partial class Form1 : Form
 	{
-		private readonly int windowTextBufferLength = 256;
+		private readonly int WINDOW_TEXT_BUFFRE_LENGTH = 256;
+		/// <summary>
+		/// Window Text(アプリタイトル)取得用バッファ
+		/// </summary>
 		private StringBuilder windowTextBuffer;
-		private readonly int logMessageBufferLength = 256;
+
 		private StringBuilder logMessageBuffer;
 
 		Dictionary<IntPtr, string> windowHandleExeFilePathDic;
@@ -25,26 +28,34 @@ namespace HookTest
 		public Form1()
 		{
 			InitializeComponent();
-			windowTextBuffer = new StringBuilder(windowTextBufferLength);
-			logMessageBuffer = new StringBuilder(logMessageBufferLength);
+			windowTextBuffer = new StringBuilder(WINDOW_TEXT_BUFFRE_LENGTH);
+			logMessageBuffer = new StringBuilder();
 			windowHandleExeFilePathDic = new Dictionary<IntPtr, string>();
+			this.Text = Properties.Resources.ApplicationTittle;
 		}
 
 		private StreamWriter logStream;
-		private bool OpenLogFile()
+		private string OpenLogFile()
 		{
+			var logFileName = $"{DateTime.Now:yyyyMMdd-HHmm}.txt";
 			try
 			{
-				logStream = new StreamWriter($"{DateTime.Now("yyyyMMdd-HHmm")}.txt", true, Encoding.GetEncoding("SHIFT_JIS"));
+				logStream = new StreamWriter(logFileName, true, Encoding.GetEncoding("SHIFT_JIS"));
 			}
 			catch (Exception)
 			{
-				return false;
+				return null;
 			}
-			return true;
+			return logFileName;
 		}
 
-		private void FlushLogFile() => logStream?.Flush();
+		readonly int FlushLogCount = 500;
+		int logCounter;
+		private void FlushLogFile()
+		{
+			logCounter = 0;
+			logStream?.Flush();
+		}
 
 		private void CloseLogFile()
 		{
@@ -132,14 +143,24 @@ namespace HookTest
 			return processInfo;
 		}
 
+		void AppendToLogFileAndTextBox(string logMessage)
+		{
+			logMessageBuffer.Insert(0, logMessage + "\r\n");
+			textBoxLog.Text = logMessageBuffer.ToString();
+			logStream.WriteLine(logMessage);
+			if (++logCounter > FlushLogCount) FlushLogFile();
+
+			textBoxLogSize.Text = logMessageBuffer.Length.ToString();
+			textBoxHandleCount.Text = windowHandleExeFilePathDic.Count.ToString();
+		}
+
 		void hookMouseTest(ref MouseHook.StateMouse s)
 		{
-			button1.Text = s.X + ", " + s.Y;
+			textBoxMouse.Text = s.X + ", " + s.Y;
 
 			if ((s.Stroke & strokeMask) == 0)	return;			// Down/Up以外は無視
-			if (s.X == previousX && s.Y == previousY) return;   // 前回と同じ場所でのクリックは無視
+			if (s.X == previousX && s.Y == previousY) return;	// 前回と同じ場所でのクリックは無視
 
-			logMessageBuffer.Length = 0;
 			(var handle, var windowText) = GetForgroundWindowHundleAndText();
 
 			if (handle == this.Handle) return;
@@ -150,9 +171,7 @@ namespace HookTest
 				windowHandleExeFilePathDic.Add(handle, Path.GetFileName(processInfo.ProcessFilePath));
 			}
 
-			logMessageBuffer.Append($"{DateTime.Now:HH:mm:ss}, {handle.ToInt64():X8}, {s.Stroke}, {windowText}, {windowHandleExeFilePathDic[handle]}");
-			textBox1.Text = logMessageBuffer + "\r\n" + textBox1.Text;
-			logStream.WriteLine(logMessageBuffer);
+			AppendToLogFileAndTextBox($"{DateTime.Now:HH:mm:ss}\tM\t{windowText}\t{windowHandleExeFilePathDic[handle]}");
 
 			previousX = s.X;
 			previousY = s.Y;
@@ -162,11 +181,10 @@ namespace HookTest
 		long previousTicks = 0;
 		void hookKeyboardTest(ref KeyboardHook.StateKeyboard s)
 		{
-			button2.Text = s.Key.ToString();
+			textBoxKeyboard.Text = s.Key.ToString();
 			(var handle, var windowText) = GetForgroundWindowHundleAndText();
 
 			if (handle == previousHwnd && (DateTime.Now.Ticks - previousTicks)<10000000) return;    // 同じウインドウ上で1秒以内のキー入力は無視する
-
 			if (handle == this.Handle) return;
 
 			if (!windowHandleExeFilePathDic.ContainsKey(handle))
@@ -175,55 +193,42 @@ namespace HookTest
 				windowHandleExeFilePathDic.Add(handle, Path.GetFileName(processInfo.ProcessFilePath));
 			}
 
-			logMessageBuffer.Length = 0;
-			logMessageBuffer.Append($"{DateTime.Now:HH:mm:ss}, {handle.ToInt64():X8}, KEYBOARD, {windowText}, {windowHandleExeFilePathDic[handle]}");
-			textBox1.Text = logMessageBuffer + "\r\n" + textBox1.Text;
-			logStream.WriteLine(logMessageBuffer);
+			AppendToLogFileAndTextBox($"{DateTime.Now:HH:mm:ss}\tK\t{windowText}\t{windowHandleExeFilePathDic[handle]}");
 
 			previousHwnd = handle;
 			previousTicks = DateTime.Now.Ticks;
 		}
 
-		private void button1_Click(object sender, EventArgs e)
+		private void buttonLog_Click(object sender, EventArgs e)
 		{
+			string logFileName = null;
 			if (logStream == null)
 			{
-				if (!OpenLogFile())
+				logFileName = OpenLogFile();
+				if (logFileName==null)
 				{
-					textBox1.Text = "failed to open log file." + textBox1.Text;
+					textBoxLog.Text = "ログファイルが作成できません.\r\n" + textBoxLog.Text;
+					return;
 				}
 			}
+
 			if (MouseHook.IsHooking)
 			{
+				this.Text = Properties.Resources.ApplicationTittle;
+				textBoxLog.Text = "記録を停止しました\r\n" + textBoxLog.Text;
 				MouseHook.Stop();
-				button1.Text = "Hook Mouse";
+				KeyboardHook.Stop();
+				buttonLog.Text = "記録開始";
 				FlushLogFile();
 				return;
 			}
 
-			button1.Text = "Mouse Hooking";
+			textBoxLog.Text = $"記録を開始します {Path.GetFileName(logFileName)}\r\n" + textBoxLog.Text;
+			buttonLog.Text = "記録停止";
+			this.Text = Properties.Resources.ApplicationTittle + " - 記録中";
+
 			MouseHook.AddEvent(hookMouseTest);
 			MouseHook.Start();
-		}
-
-		private void button2_Click(object sender, EventArgs e)
-		{
-			if (logStream == null)
-			{
-				if (!OpenLogFile())
-				{
-					textBox1.Text = "failed to open log file.\r\n" + textBox1.Text;
-				}
-			}
-			if (KeyboardHook.IsHooking)
-			{
-				KeyboardHook.Stop();
-				button2.Text = "Hook Keyboard";
-				FlushLogFile();
-				return;
-			}
-
-			button2.Text = "Keyboard Hooking";
 			KeyboardHook.AddEvent(hookKeyboardTest);
 			KeyboardHook.Start();
 		}
